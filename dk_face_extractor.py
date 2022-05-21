@@ -144,6 +144,7 @@ def open_image(path: Path):
             if JXLImagePlugin:
                 try:
                     img = Image.open(path)
+                    return img
                 except Exception:
                     pass
             img = open_image_by_cmd(path, "djxl")
