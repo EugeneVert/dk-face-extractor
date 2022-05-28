@@ -16,6 +16,8 @@ class Opt(Tap):
     db: Path = Path.home() / ".config/vert/digikam4.db"
     output_dir: Path = Path("Faces")
     mount: Path = Path("/")
+    min_face_count: int = 0
+    append_parent_tag_name: bool = False
     resize: int = 0
 
 
@@ -26,7 +28,12 @@ def main():
     db = sqlite3.connect(opt.db)
     cur = db.cursor()
 
-    data = fetch_data_from_db(cur, mount=opt.mount)
+    data = fetch_data_from_db(
+        cur,
+        mount=opt.mount,
+        append_parent_tag_name=opt.append_parent_tag_name,
+        min_face_count=opt.min_face_count,
+    )
 
     pool = Pool()
     res = [pool.apply_async(save_face, (*i, opt.output_dir, opt.resize)) for i in data]
@@ -39,7 +46,7 @@ def main():
 
 
 def fetch_data_from_db(
-    cur: sqlite3.Cursor, mount=Path("/"), append_parent_tag_name=False
+    cur: sqlite3.Cursor, mount=Path("/"), append_parent_tag_name=False, min_face_count=0
 ):
     """Get image_path, face_region, tag_name
     from digiKam database
@@ -48,40 +55,91 @@ def fetch_data_from_db(
         cur (sqlite3.Cursor): Cursor for database
         mount (pathlib.Path, optional): Path to mountpoint of AlbumRoots. Defaults to Path("/").
     """
-    cur.execute(
-        """
-SELECT substr(specificPath, 2) || relativePath || '/' || i.name,
-       t.name AS TagName,
-       value AS Rect
-FROM
-  (SELECT id,
-          name
-   FROM
-     (SELECT tagid
-      FROM TagProperties
-      WHERE property == 'faceEngineId' ) fei
-   JOIN Tags ON Tags.id == fei.tagid) t
-JOIN ImageTagProperties ON ImageTagProperties.tagid == t.id
-JOIN
-  (SELECT *
-   FROM Images
-   JOIN Albums ON Albums.id == Images.album
-   JOIN AlbumRoots ON AlbumRoots.id == Albums.albumRoot) i ON i.id == ImageTagProperties.imageid
-WHERE ImageTagProperties.value like '<rect x=%'
-  AND ImageTagProperties.property == 'tagRegion'
-        """
-    )
 
     data = []
-    for image_path_without_mount, tag_name, face_region_xml in cur.fetchall():
-        image_path = mount.expanduser() / image_path_without_mount
-        face_region = parse_rect(face_region_xml)
 
-        data.append((image_path, face_region, tag_name))
-    return data
+    q = """
+    """
+
+    query = """
+SELECT substr(specificPath, 2) || relativePath || '/' || i.name,
+       t.name AS TagName,"""
+
+    if append_parent_tag_name:
+        query += """
+       parent_tag.name AS ParentTagName, """
+
+    query += """
+       ImageTagProperties.value AS Rect
+-- Get all face tags
+FROM
+    (SELECT id,
+            pid,
+            name
+     FROM
+         (SELECT tagid
+          FROM TagProperties
+          WHERE property == 'faceEngineId' ) fei
+     JOIN Tags ON Tags.id == fei.tagid) t"""
+
+    if min_face_count != 0:
+        query += """
+    -- Filter face tags by count
+    JOIN
+        (SELECT tagid
+        FROM ImageTagProperties
+        GROUP BY tagid
+        HAVING COUNT(tagid) >= ?) itpc ON itpc.tagid == t.id"""
+
+    query += """
+    -- Get face regions and image ids with face tags
+    JOIN ImageTagProperties ON ImageTagProperties.tagid == t.id"""
+
+    if append_parent_tag_name:
+        query += """
+-- Get parent tag
+JOIN Tags AS parent_tag ON parent_tag.id == t.pid"""
+
+    query += """
+-- Get albums and these albums roots for images
+JOIN
+    (SELECT *
+     FROM Images
+     JOIN Albums ON Albums.id == Images.album
+     JOIN AlbumRoots ON AlbumRoots.id == Albums.albumRoot) i ON i.id == ImageTagProperties.imageid
+WHERE ImageTagProperties.value like '<rect x=%'
+    AND ImageTagProperties.property == 'tagRegion'
+    """
+
+    if min_face_count:
+        cur.execute(query, (min_face_count,))
+    else:
+        cur.execute(query)
+
+    if append_parent_tag_name:
+        for (
+            image_path_without_mount,
+            tag_name,
+            parent_tag_name,
+            face_region_xml,
+        ) in cur.fetchall():
+            image_path = mount.expanduser() / image_path_without_mount
+            face_region = parse_rect(face_region_xml)
+            tag_name = f"{parent_tag_name}∕{tag_name}"  # NOTE ∕ is a [Division Slash]
+
+            data.append((image_path, face_region, tag_name))
+        return data
+
+    else:
+        for (image_path_without_mount, tag_name, face_region_xml) in cur.fetchall():
+            image_path = mount.expanduser() / image_path_without_mount
+            face_region = parse_rect(face_region_xml)
+
+            data.append((image_path, face_region, tag_name))
+        return data
 
 
-def save_face(image_path, face_region, tag_name, output_dir: Path, opt, resize_to=0):
+def save_face(image_path, face_region, tag_name, output_dir: Path, resize_to: int):
     print(image_path)
     tag_folder_path = output_dir / tag_name
     tag_folder_path.mkdir(exist_ok=True)
