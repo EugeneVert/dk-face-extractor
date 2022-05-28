@@ -112,12 +112,14 @@ def save_face(image_path, face_region, tag_name, output_dir: Path, opt, resize_t
     )
 
     face_crop = image.crop(box)
+    image.close()
 
     if resize_to != 0:
         size_to = (resize_to, resize_to)
         face_crop = face_crop.resize(size_to)
 
     face_crop.save(output_path, optimize=False)
+    face_crop.close()
 
 
 def parse_rect(rect):
@@ -136,9 +138,9 @@ def parse_rect(rect):
 def open_image(path: Path):
     """Wrapper of PIL.Image.open for JXL and Avif support
     Opens supported by pillow formats directly.
-    Will try to load JXL images via jxlpy
-    (NOTE jxlpy is ?not? working with latest libjxl as for 05.2022)
-    else will try to load image using subprocess (djxl/avifdec)
+    Will try to load image using subprocess (djxl/avifdec)
+    # Will try to load JXL images via jxlpy
+    # (NOTE  jxlpy is ?not? working with latest libjxl as for 05.2022)
 
     Args:
         path (Path): Path of image
@@ -146,19 +148,21 @@ def open_image(path: Path):
     Returns:
         Image: PIL Image
     """
-    try:
-        from jxlpy import JXLImagePlugin
-    except ImportError:
-        JXLImagePlugin = None
+    # try:
+    #     from jxlpy import JXLImagePlugin
+    # except ImportError:
+    #     JXLImagePlugin = None
 
     try:
         if path.name.endswith(".jxl"):
-            if JXLImagePlugin:
-                try:
-                    img = Image.open(path)
-                    return img
-                except Exception:
-                    pass
+            # if JXLImagePlugin:
+            #     try:
+            #         # ?memory leaks?
+            #         img = Image.open(path)
+            #         img.load()
+            #         return img
+            #     except OSError:
+            #         pass
             img = open_image_by_cmd(path, "djxl")
         elif path.name.endswith(".avif"):
             img = open_image_by_cmd(path, "avifdec -d 8 --png-compress 0")
@@ -194,6 +198,8 @@ def open_image_by_cmd(path: Path, cmd: str):
         tmp.seek(0)
         img = BytesIO(tmp.read())
         image = Image.open(img)
+        image.load()
+        img.close()
         return image
 
 
