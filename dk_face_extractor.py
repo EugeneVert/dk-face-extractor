@@ -15,7 +15,8 @@ from tap import Tap
 class Opt(Tap):
     db: Path = Path.home() / ".config/vert/digikam4.db"
     output_dir: Path = Path("Faces")
-    mount: Path = Path('/')
+    mount: Path = Path("/")
+    resize: int = 0
 
 
 def main():
@@ -28,7 +29,7 @@ def main():
     data = fetch_data_from_db(cur, mount=opt.mount)
 
     pool = Pool()
-    res = [pool.apply_async(save_face, (*i, opt.output_dir)) for i in data]
+    res = [pool.apply_async(save_face, (*i, opt.output_dir, opt.resize)) for i in data]
     for r in res:
         r.get()
     pool.close()
@@ -37,7 +38,9 @@ def main():
     db.close()
 
 
-def fetch_data_from_db(cur: sqlite3.Cursor, mount=Path("/")):
+def fetch_data_from_db(
+    cur: sqlite3.Cursor, mount=Path("/"), append_parent_tag_name=False
+):
     """Get image_path, face_region, tag_name
     from digiKam database
 
@@ -66,20 +69,19 @@ JOIN
    JOIN AlbumRoots ON AlbumRoots.id == Albums.albumRoot) i ON i.id == ImageTagProperties.imageid
 WHERE ImageTagProperties.value like '<rect x=%'
   AND ImageTagProperties.property == 'tagRegion'
-        """)
+        """
+    )
 
     data = []
     for image_path_without_mount, tag_name, face_region_xml in cur.fetchall():
         image_path = mount.expanduser() / image_path_without_mount
         face_region = parse_rect(face_region_xml)
 
-        data.append((
-            image_path, face_region, tag_name
-        ))
+        data.append((image_path, face_region, tag_name))
     return data
 
 
-def save_face(image_path, face_region, tag_name, output_dir: Path):
+def save_face(image_path, face_region, tag_name, output_dir: Path, opt, resize_to=0):
     print(image_path)
     tag_folder_path = output_dir / tag_name
     tag_folder_path.mkdir(exist_ok=True)
@@ -95,17 +97,27 @@ def save_face(image_path, face_region, tag_name, output_dir: Path):
     height = face_region[3]
 
     square_width = ceil(sqrt(width * height))
-    center = (x + width/2, y + height/2)
+    center = (x + width / 2, y + height / 2)
 
-    box = list(  # [x1, y1, x2, y2]
-        map(ceil,
-            (center[0] - square_width/2, center[1] - square_width/2,
-             center[0] + square_width/2, center[1] + square_width/2)))
+    box = tuple(  # [x1, y1, x2, y2]
+        map(
+            ceil,
+            (
+                center[0] - square_width / 2,
+                center[1] - square_width / 2,
+                center[0] + square_width / 2,
+                center[1] + square_width / 2,
+            ),
+        )
+    )
 
     face_crop = image.crop(box)
-    face_crop_resized = face_crop.resize((224, 224))
 
-    face_crop_resized.save(output_path, optimize=False)
+    if resize_to != 0:
+        size_to = (resize_to, resize_to)
+        face_crop = face_crop.resize(size_to)
+
+    face_crop.save(output_path, optimize=False)
 
 
 def parse_rect(rect):
@@ -149,8 +161,7 @@ def open_image(path: Path):
                     pass
             img = open_image_by_cmd(path, "djxl")
         elif path.name.endswith(".avif"):
-            img = open_image_by_cmd(
-                path, "avifdec -d 8 --png-compress 0")
+            img = open_image_by_cmd(path, "avifdec -d 8 --png-compress 0")
         else:
             return Image.open(path).convert("RGB")
         return img
@@ -173,7 +184,10 @@ def open_image_by_cmd(path: Path, cmd: str):
     with tempfile.NamedTemporaryFile(prefix="png_", suffix=".png") as tmp:
         cmd = f'{cmd} "{path.resolve()}" "{tmp.name}"'
         proc = subprocess.Popen(
-            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
             # cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr
         )
         proc.communicate()
