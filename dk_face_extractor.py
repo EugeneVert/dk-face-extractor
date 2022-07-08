@@ -7,6 +7,7 @@ from io import BytesIO
 from math import ceil, sqrt
 from multiprocessing import Pool
 from pathlib import Path
+from typing import Tuple
 
 from PIL import Image
 from tap import Tap
@@ -16,6 +17,7 @@ class Opt(Tap):
     db: Path = Path.home() / ".config/vert/digikam4.db"
     output_dir: Path = Path("Faces")
     mount: Path = Path("/")
+    root: str
     min_face_count: int = 0
     append_parent_tag_name: bool = False
     resize: int = 0
@@ -30,6 +32,7 @@ def main():
 
     data = fetch_data_from_db(
         cur,
+        opt.root,
         mount=opt.mount,
         append_parent_tag_name=opt.append_parent_tag_name,
         min_face_count=opt.min_face_count,
@@ -46,7 +49,11 @@ def main():
 
 
 def fetch_data_from_db(
-    cur: sqlite3.Cursor, mount=Path("/"), append_parent_tag_name=False, min_face_count=0
+    cur: sqlite3.Cursor,
+    root,
+    mount=Path("/"),
+    append_parent_tag_name=False,
+    min_face_count=0,
 ):
     """Get image_path, face_region, tag_name
     from digiKam database
@@ -57,9 +64,6 @@ def fetch_data_from_db(
     """
 
     data = []
-
-    q = """
-    """
 
     query = """
 SELECT substr(specificPath, 2) || relativePath || '/' || i.name,
@@ -111,6 +115,9 @@ WHERE ImageTagProperties.value like '<rect x=%'
     AND ImageTagProperties.property == 'tagRegion'
     """
 
+    query += f"\
+    AND label == '{root}'"
+
     if min_face_count:
         cur.execute(query, (min_face_count,))
     else:
@@ -156,15 +163,23 @@ def save_face(image_path, face_region, tag_name, output_dir: Path, resize_to: in
 
     square_width = ceil(sqrt(width * height))
     center = (x + width / 2, y + height / 2)
+    margin = (
+        square_width / 10
+    )  # FaceUtils::faceRectDisplayMargin:utilities/facemanagement/database/faceutils.cpp 438
 
-    box = tuple(  # [x1, y1, x2, y2]
+    x1 = center[0] - square_width / 2 - margin
+    y1 = center[1] - square_width / 2 - margin
+    x2 = center[0] + square_width / 2 + margin
+    y2 = center[1] + square_width / 2 + margin
+
+    box = tuple(
         map(
             ceil,
             (
-                center[0] - square_width / 2,
-                center[1] - square_width / 2,
-                center[0] + square_width / 2,
-                center[1] + square_width / 2,
+                x1 if x1 > 0 else 0,
+                y1 if y1 > 0 else 0,
+                x2 if x2 < image.size[0] else image.size[0],
+                y2 if y2 < image.size[1] else image.size[1],
             ),
         )
     )
