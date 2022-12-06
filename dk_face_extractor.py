@@ -89,9 +89,18 @@ def main():
         pool.apply_async(save_face, (*i, opt.output_dir, opt.resize, opt.overwrite))
         for i in data
     ]
-    [r.wait() for r in res]
+    saved_faces_paths = list([str(r.get()) + "\n" for r in res])
     pool.close()
     pool.join()
+
+    if opt.faces_list.exists():
+        with open(opt.faces_list, "r") as f:
+            saved_faces: set[str] = set(f.readlines())
+    else:
+        saved_faces = set()
+    saved_faces.update(saved_faces_paths)
+    with open(opt.faces_list, "w") as f:
+        f.writelines(saved_faces)
 
     db.close()
 
@@ -171,7 +180,6 @@ WHERE AlbumRoots.label == ?
         face_region = parse_rect(face_region_xml)
         data.append((image_path, face_region, tag_name))
 
-
     return data
 
 
@@ -188,7 +196,6 @@ def save_face(
     """
     tag_folder_path = output_dir / tag_name
     tag_folder_path.mkdir(exist_ok=True)
-
 
     region_encode = int("".join(map(str, face_region)))
     region_encode_base32 = int2base32(region_encode)
@@ -286,7 +293,7 @@ def open_image(path: Path):
             #         return img
             #     except OSError:
             #         pass
-            img = open_image_by_cmd(path, "djxl")
+            img = open_image_by_cmd(path, "djxl --num_threads=1")
         elif path.name.endswith(".avif"):
             img = open_image_by_cmd(path, "avifdec -d 8 --png-compress 0")
         else:
