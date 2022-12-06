@@ -16,12 +16,31 @@ BASE32ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--db", type=Path, required=True, help="path to digikam4.db")
-    parser.add_argument("-o", "--output-dir", type=Path, default=Path("Faces"))
     parser.add_argument(
-        "-m", "--mount", type=Path, default=Path("/"), help="path to album mountpoint"
+        "--db",
+        type=Path,
+        required=True,
+        help="path to digikam4.db",
     )
-    parser.add_argument("--root", type=str, required=True, help="album root")
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=Path("Faces"),
+    )
+    parser.add_argument(
+        "-m",
+        "--mount",
+        type=Path,
+        default=Path("/"),
+        help="path to album mountpoint",
+    )
+    parser.add_argument(
+        "--root",
+        type=str,
+        required=True,
+        help="album root",
+    )
     parser.add_argument(
         "--min",
         type=int,
@@ -41,7 +60,14 @@ def main():
         help="resize extracted face regions to this size",
     )
     parser.add_argument(
-        "--overwrite", action="store_true", help="reextract existing face regions"
+        "--overwrite",
+        action="store_true",
+        help="reextract existing face regions",
+    )
+    parser.add_argument(
+        "--faces-list",
+        type=Path,
+        default=Path("./faces.txt"),
     )
 
     opt = parser.parse_args()
