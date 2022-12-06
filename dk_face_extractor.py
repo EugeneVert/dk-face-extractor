@@ -89,85 +89,56 @@ def fetch_data_from_db(
 
     query = """
 SELECT
-    substr(specificPath, 2) || relativePath || '/' || i.name,
-    ImageTagProperties.value AS Rect,"""
-    if append_parent_tag_name:
-        query += """
-        parent_tag.name,
-        """
-    query += """
-    t.name
+    substr(specificPath, 2) || relativePath || '/' || Images.name as Relpath,
+    value AS Rect,
+    t.name AS TagName,
+    parent_tag.name as ParentTagName
 FROM
-    -- Get all tags
     (
     SELECT
         id,
         pid,
         name
     FROM
-        Tags) t
-    -- Filter by face tags and assigned faces count
-JOIN (
-    SELECT
-        tagid
-    FROM
-        ImageTagProperties
+        Tags
+    JOIN ImageTagProperties ON
+        ImageTagProperties.tagid == Tags.id
     GROUP BY
         tagid
-    HAVING"""
-    if min_face_count != 0:
-        query += f"""
+    HAVING
         COUNT(tagid) >= ?
-        AND"""
-    query += """ property == 'tagRegion') fei ON
-    fei.tagid == t.id
--- Get tagRegions
+        AND ImageTagProperties.property == "tagRegion") t
 JOIN ImageTagProperties ON
-    ImageTagProperties.tagid == t.id"""
-
-    if append_parent_tag_name:
-        query += """
-        -- Get parent tag
-        JOIN Tags AS parent_tag ON
-            parent_tag.id == t.pid
-    """
-    query += """
-    -- Get paths
-JOIN (
-    SELECT
-        *
-    FROM
-        Images
-    JOIN Albums ON
-        Albums.id == Images.album
-    JOIN AlbumRoots ON
-        AlbumRoots.id == Albums.albumRoot) i ON
-    i.id == ImageTagProperties.imageid
-WHERE
-    ImageTagProperties.value LIKE '<rect x=%'
-    AND ImageTagProperties.property == 'tagRegion'
-    AND label == ?
+    ImageTagProperties.tagid == t.id
+JOIN Tags AS parent_tag ON
+    parent_tag.id == t.pid
+JOIN Images ON
+    Images.id == imageid
+JOIN Albums ON
+    Albums.id == Images.album
+JOIN AlbumRoots ON
+    AlbumRoots.id == Albums.albumRoot
+WHERE AlbumRoots.label == ?
     """
 
-    if min_face_count:
-        cur.execute(query, (min_face_count, root))
-    else:
-        cur.execute(query, (root,))
+    cur.execute(query, (min_face_count, root))
 
     for row in cur.fetchall():
         if append_parent_tag_name:
             (
                 image_path_without_mount,
                 face_region_xml,
-                parent_tag_name,
                 tag_name,
+                parent_tag_name,
             ) = row
-            tag_name = f"{parent_tag_name}∕{tag_name}"  # NOTE ∕ is a [Division Slash]
+            # NOTE ∕ is a [Division Slash]
+            tag_name = f"{parent_tag_name}∕{tag_name}"
         else:
             (
                 image_path_without_mount,
                 face_region_xml,
                 tag_name,
+                _,
             ) = row
 
         image_path = mount.expanduser() / image_path_without_mount
