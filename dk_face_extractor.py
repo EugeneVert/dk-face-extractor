@@ -3,28 +3,48 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+from argparse import ArgumentParser
 from io import BytesIO
 from math import ceil, sqrt
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Tuple
 
 from PIL import Image
-from tap import Tap
 
-
-class Opt(Tap):
-    db: Path = Path.home() / ".config/vert/digikam4.db"
-    output_dir: Path = Path("Faces")
-    mount: Path = Path("/")
-    root: str
-    min_face_count: int = 0
-    append_parent_tag_name: bool = False
-    resize: int = 0
+BASE32ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
 
 
 def main():
-    opt = Opt().parse_args()
+    parser = ArgumentParser()
+    parser.add_argument("--db", type=Path, required=True, help="path to digikam4.db")
+    parser.add_argument("-o", "--output-dir", type=Path, default=Path("Faces"))
+    parser.add_argument(
+        "-m", "--mount", type=Path, default=Path("/"), help="path to album mountpoint"
+    )
+    parser.add_argument("--root", type=str, required=True, help="album root")
+    parser.add_argument(
+        "--min",
+        type=int,
+        default=0,
+        help="minimal amount of assigned faces for facetag to be extracted",
+    )
+    parser.add_argument(
+        "-a",
+        "--append-parent",
+        action="store_true",
+        help="append parent name of facetag to output dir name",
+    )
+    parser.add_argument(
+        "--resize",
+        type=int,
+        default=0,
+        help="resize extracted face regions to this size",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="reextract existing face regions"
+    )
+
+    opt = parser.parse_args()
     opt.output_dir.mkdir(exist_ok=True)
 
     db = sqlite3.connect(opt.db)
@@ -34,14 +54,16 @@ def main():
         cur,
         opt.root,
         mount=opt.mount,
-        append_parent_tag_name=opt.append_parent_tag_name,
-        min_face_count=opt.min_face_count,
+        append_parent_tag_name=opt.append_parent,
+        min_face_count=opt.min,
     )
 
     pool = Pool()
-    res = [pool.apply_async(save_face, (*i, opt.output_dir, opt.resize)) for i in data]
-    for r in res:
-        r.get()
+    res = [
+        pool.apply_async(save_face, (*i, opt.output_dir, opt.resize, opt.overwrite))
+        for i in data
+    ]
+    [r.wait() for r in res]
     pool.close()
     pool.join()
 
@@ -66,94 +88,123 @@ def fetch_data_from_db(
     data = []
 
     query = """
-SELECT substr(specificPath, 2) || relativePath || '/' || i.name,
-       t.name AS TagName,"""
-
+SELECT
+    substr(specificPath, 2) || relativePath || '/' || i.name,
+    ImageTagProperties.value AS Rect,"""
     if append_parent_tag_name:
         query += """
-       parent_tag.name AS ParentTagName, """
-
+        parent_tag.name,
+        """
     query += """
-       ImageTagProperties.value AS Rect
--- Get all face tags
+    t.name
 FROM
-    (SELECT id,
-            pid,
-            name
-     FROM
-         (SELECT tagid
-          FROM TagProperties
-          WHERE property == 'faceEngineId' ) fei
-     JOIN Tags ON Tags.id == fei.tagid) t"""
-
+    -- Get all tags
+    (
+    SELECT
+        id,
+        pid,
+        name
+    FROM
+        Tags) t
+    -- Filter by face tags and assigned faces count
+JOIN (
+    SELECT
+        tagid
+    FROM
+        ImageTagProperties
+    GROUP BY
+        tagid
+    HAVING"""
     if min_face_count != 0:
-        query += """
-    -- Filter face tags by count
-    JOIN
-        (SELECT tagid
-        FROM ImageTagProperties
-        GROUP BY tagid
-        HAVING COUNT(tagid) >= ?) itpc ON itpc.tagid == t.id"""
-
-    query += """
-    -- Get face regions and image ids with face tags
-    JOIN ImageTagProperties ON ImageTagProperties.tagid == t.id"""
+        query += f"""
+        COUNT(tagid) >= ?
+        AND"""
+    query += """ property == 'tagRegion') fei ON
+    fei.tagid == t.id
+-- Get tagRegions
+JOIN ImageTagProperties ON
+    ImageTagProperties.tagid == t.id"""
 
     if append_parent_tag_name:
         query += """
--- Get parent tag
-JOIN Tags AS parent_tag ON parent_tag.id == t.pid"""
-
+        -- Get parent tag
+        JOIN Tags AS parent_tag ON
+            parent_tag.id == t.pid
+    """
     query += """
--- Get albums and these albums roots for images
-JOIN
-    (SELECT *
-     FROM Images
-     JOIN Albums ON Albums.id == Images.album
-     JOIN AlbumRoots ON AlbumRoots.id == Albums.albumRoot) i ON i.id == ImageTagProperties.imageid
-WHERE ImageTagProperties.value like '<rect x=%'
+    -- Get paths
+JOIN (
+    SELECT
+        *
+    FROM
+        Images
+    JOIN Albums ON
+        Albums.id == Images.album
+    JOIN AlbumRoots ON
+        AlbumRoots.id == Albums.albumRoot) i ON
+    i.id == ImageTagProperties.imageid
+WHERE
+    ImageTagProperties.value LIKE '<rect x=%'
     AND ImageTagProperties.property == 'tagRegion'
+    AND label == ?
     """
 
-    query += f"\
-    AND label == '{root}'"
-
     if min_face_count:
-        cur.execute(query, (min_face_count,))
+        cur.execute(query, (min_face_count, root))
     else:
-        cur.execute(query)
+        cur.execute(query, (root,))
 
-    if append_parent_tag_name:
-        for (
-            image_path_without_mount,
-            tag_name,
-            parent_tag_name,
-            face_region_xml,
-        ) in cur.fetchall():
-            image_path = mount.expanduser() / image_path_without_mount
-            face_region = parse_rect(face_region_xml)
+    for row in cur.fetchall():
+        if append_parent_tag_name:
+            (
+                image_path_without_mount,
+                face_region_xml,
+                parent_tag_name,
+                tag_name,
+            ) = row
             tag_name = f"{parent_tag_name}∕{tag_name}"  # NOTE ∕ is a [Division Slash]
+        else:
+            (
+                image_path_without_mount,
+                face_region_xml,
+                tag_name,
+            ) = row
 
-            data.append((image_path, face_region, tag_name))
-        return data
-
-    else:
-        for (image_path_without_mount, tag_name, face_region_xml) in cur.fetchall():
-            image_path = mount.expanduser() / image_path_without_mount
-            face_region = parse_rect(face_region_xml)
-
-            data.append((image_path, face_region, tag_name))
-        return data
+        image_path = mount.expanduser() / image_path_without_mount
+        face_region = parse_rect(face_region_xml)
+        data.append((image_path, face_region, tag_name))
 
 
-def save_face(image_path, face_region, tag_name, output_dir: Path, resize_to: int):
-    print(image_path)
+    return data
+
+
+def save_face(
+    image_path: Path,
+    face_region: tuple[int, int, int, int],
+    tag_name: str,
+    output_dir: Path,
+    resize_to: int,
+    overwrite: bool = False,
+):
+    """
+    Save face region and return file path.
+    """
     tag_folder_path = output_dir / tag_name
     tag_folder_path.mkdir(exist_ok=True)
-    output_path = tag_folder_path / (image_path.with_suffix(".png").name)
-    if output_path.exists():
-        return
 
+
+    region_encode = int("".join(map(str, face_region)))
+    region_encode_base32 = int2base32(region_encode)
+
+    output_name = image_path.with_name(
+        f"{image_path.stem}-{region_encode_base32}.png"
+    ).name
+    output_path = tag_folder_path / output_name
+
+    if (not overwrite) and output_path.exists():
+        return output_path
+
+    print(f"Extracting: {image_path}")
     image: Image.Image = open_image(image_path)
 
     x = face_region[0]
@@ -193,6 +244,8 @@ def save_face(image_path, face_region, tag_name, output_dir: Path, resize_to: in
 
     face_crop.save(output_path, optimize=False)
     face_crop.close()
+
+    return output_path
 
 
 def parse_rect(rect):
@@ -274,6 +327,18 @@ def open_image_by_cmd(path: Path, cmd: str):
         image.load()
         img.close()
         return image
+
+
+def int2base32(x: int) -> str:
+    res = ""
+    while True:
+        if x < 32:
+            res += BASE32ALPHABET[x]
+            break
+        else:
+            res += BASE32ALPHABET[x % 32]
+            x //= 32
+    return res[::-1]
 
 
 if __name__ == "__main__":
