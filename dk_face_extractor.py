@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
+import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from argparse import ArgumentParser
 from io import BytesIO
 from math import ceil, sqrt
 from multiprocessing import Pool
-from pathlib import Path
 
 from PIL import Image
 
@@ -18,21 +19,21 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
         "--db",
-        type=Path,
+        type=str,
         required=True,
         help="path to digikam4.db",
     )
     parser.add_argument(
         "-o",
         "--output-dir",
-        type=Path,
-        default=Path("Faces"),
+        type=str,
+        default="Faces",
     )
     parser.add_argument(
         "-m",
         "--mount",
-        type=Path,
-        default=Path("/"),
+        type=str,
+        default="/",
         help="path to album mountpoint",
     )
     parser.add_argument(
@@ -66,12 +67,16 @@ def main():
     )
     parser.add_argument(
         "--faces-list",
-        type=Path,
-        default=Path("./faces.txt"),
+        type=str,
+        default="faces.txt",
     )
 
     opt = parser.parse_args()
-    opt.output_dir.mkdir(exist_ok=True)
+
+    try:
+        os.mkdir(opt.output_dir)
+    except FileExistsError:
+        pass
 
     db = sqlite3.connect(opt.db)
     cur = db.cursor()
@@ -89,18 +94,18 @@ def main():
         pool.apply_async(save_face, (*i, opt.output_dir, opt.resize, opt.overwrite))
         for i in data
     ]
-    saved_faces_paths = list([str(r.get()) + "\n" for r in res])
+    saved_faces_paths = list((str(r.get()) + "\n" for r in res))
     pool.close()
     pool.join()
 
     if opt.faces_list.exists():
-        with open(opt.faces_list, "r") as f:
-            saved_faces: set[str] = set(f.readlines())
+        with open(opt.faces_list, "r", encoding="utf-8") as file:
+            saved_faces: set[str] = set(file.readlines())
     else:
         saved_faces = set()
     saved_faces.update(saved_faces_paths)
-    with open(opt.faces_list, "w") as f:
-        f.writelines(saved_faces)
+    with open(opt.faces_list, "w", encoding="utf-8") as file:
+        file.writelines(saved_faces)
 
     db.close()
 
@@ -108,7 +113,7 @@ def main():
 def fetch_data_from_db(
     cur: sqlite3.Cursor,
     root,
-    mount=Path("/"),
+    mount="/",
     append_parent_tag_name=False,
     min_face_count=0,
 ):
@@ -176,7 +181,7 @@ WHERE AlbumRoots.label == ?
                 _,
             ) = row
 
-        image_path = mount.expanduser() / image_path_without_mount
+        image_path = os.path.join(os.path.expanduser(mount), image_path_without_mount)
         face_region = parse_rect(face_region_xml)
         data.append((image_path, face_region, tag_name))
 
@@ -184,33 +189,54 @@ WHERE AlbumRoots.label == ?
 
 
 def save_face(
-    image_path: Path,
+    image_path: str,
     face_region: tuple[int, int, int, int],
     tag_name: str,
-    output_dir: Path,
+    output_dir: str,
     resize_to: int,
     overwrite: bool = False,
-):
+) -> str:
     """
     Save face region and return file path.
     """
-    tag_folder_path = output_dir / tag_name
-    tag_folder_path.mkdir(exist_ok=True)
+    tag_folder_path = os.path.join(output_dir, tag_name)
+    try:
+        os.mkdir(tag_folder_path)
+    except FileExistsError:
+        pass
 
     region_encode = int("".join(map(str, face_region)))
     region_encode_base32 = int2base32(region_encode)
 
-    output_name = image_path.with_name(
-        f"{image_path.stem}-{region_encode_base32}.png"
-    ).name
-    output_path = tag_folder_path / output_name
+    _, filename = os.path.split(image_path)
+    basename, _ = os.path.splitext(filename)
+    output_path = os.path.join(
+        tag_folder_path, f"{basename}-{region_encode_base32}.png"
+    )
 
-    if (not overwrite) and output_path.exists():
+    if (not overwrite) and os.path.exists(output_path):
         return output_path
 
     print(f"Extracting: {image_path}")
     image: Image.Image = open_image(image_path)
 
+    box = box_from_region(face_region, image.size)
+    face_crop = image.crop(box)
+    image.close()
+
+    if resize_to != 0:
+        size_to = (resize_to, resize_to)
+        face_crop = face_crop.resize(size_to)
+
+    face_crop.save(output_path, optimize=False)
+    face_crop.close()
+
+    return output_path
+
+
+def box_from_region(
+    face_region: tuple[int, int, int, int], image_size: tuple[int, int]
+) -> tuple[int, int, int, int]:
     x = face_region[0]
     y = face_region[1]
     width = face_region[2]
@@ -227,29 +253,20 @@ def save_face(
     x2 = center[0] + square_width / 2 + margin
     y2 = center[1] + square_width / 2 + margin
 
-    box = tuple(
+    return tuple(
         map(
             ceil,
             (
                 x1 if x1 > 0 else 0,
                 y1 if y1 > 0 else 0,
-                x2 if x2 < image.size[0] else image.size[0],
-                y2 if y2 < image.size[1] else image.size[1],
+                x2 if x2 < image_size[0] else image_size[0],
+                y2 if y2 < image_size[1] else image_size[1],
             ),
         )
     )
 
-    face_crop = image.crop(box)
-    image.close()
 
-    if resize_to != 0:
-        size_to = (resize_to, resize_to)
-        face_crop = face_crop.resize(size_to)
-
-    face_crop.save(output_path, optimize=False)
-    face_crop.close()
-
-    return output_path
+RE_RECT = re.compile(r"\w*=\"(\d*)\"")
 
 
 def parse_rect(rect):
@@ -261,62 +278,47 @@ def parse_rect(rect):
     Returns:
         Turple[int, int, int, int]: x, y, width, height
     """
-    RE = re.compile(r"\w*=\"(\d*)\"")
-    return list(map(int, RE.findall(rect)))
+    return list(map(int, RE_RECT.findall(rect)))
 
 
-def open_image(path: Path):
+def open_image(path: str) -> Image.Image:
     """Wrapper of PIL.Image.open for JXL and Avif support
     Opens supported by pillow formats directly.
     Will try to load image using subprocess (djxl/avifdec)
-    # Will try to load JXL images via jxlpy
-    # (NOTE  jxlpy is ?not? working with latest libjxl as for 05.2022)
 
     Args:
-        path (Path): Path of image
+        path (str): Path of image
 
     Returns:
         Image: PIL Image
     """
-    # try:
-    #     from jxlpy import JXLImagePlugin
-    # except ImportError:
-    #     JXLImagePlugin = None
 
     try:
-        if path.name.endswith(".jxl"):
-            # if JXLImagePlugin:
-            #     try:
-            #         # ?memory leaks?
-            #         img = Image.open(path)
-            #         img.load()
-            #         return img
-            #     except OSError:
-            #         pass
+        if path.endswith(".jxl"):
             img = open_image_by_cmd(path, "djxl --num_threads=1")
-        elif path.name.endswith(".avif"):
+        elif path.endswith(".avif"):
             img = open_image_by_cmd(path, "avifdec -d 8 --png-compress 0")
         else:
-            return Image.open(path).convert("RGB")
-        return img
-    except Exception as e:
+            img = Image.open(path).convert("RGB")
+    except Exception as err:
         print(path)
-        print(e)
-        exit()
+        print(err)
+        sys.exit()
+    return img
 
 
-def open_image_by_cmd(path: Path, cmd: str):
+def open_image_by_cmd(path: str, cmd: str) -> Image.Image:
     """Load image as BytesIO using shell command
 
     Args:
-        path (Path): Path of image
+        path (str): Path of image
         cmd (str): Decoder command
 
     Returns:
         Image: PIL Image
     """
     with tempfile.NamedTemporaryFile(prefix="png_", suffix=".png") as tmp:
-        cmd = f'{cmd} "{path.resolve()}" "{tmp.name}"'
+        cmd = f'{cmd} "{os.path.abspath(path)}" "{tmp.name}"'
         proc = subprocess.Popen(
             cmd,
             shell=True,
@@ -333,15 +335,14 @@ def open_image_by_cmd(path: Path, cmd: str):
         return image
 
 
-def int2base32(x: int) -> str:
+def int2base32(number: int) -> str:
     res = ""
     while True:
-        if x < 32:
-            res += BASE32ALPHABET[x]
+        if number < 32:
+            res += BASE32ALPHABET[number]
             break
-        else:
-            res += BASE32ALPHABET[x % 32]
-            x //= 32
+        res += BASE32ALPHABET[number % 32]
+        number //= 32
     return res[::-1]
 
 
