@@ -11,6 +11,16 @@ from pathlib import Path
 
 from PIL import Image
 
+try:
+    import pillow_avif
+except ImportError:
+    pillow_avif = None
+
+try:
+    from jxlpy import JXLImagePlugin
+except ImportError:
+    JXLImagePlugin = None
+
 BASE32ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
 
 
@@ -209,7 +219,7 @@ def save_face(
         return output_path
 
     print(f"Extracting: {image_path}")
-    image: Image.Image = open_image(image_path)
+    image: Image.Image = open_image(image_path).convert("RGB")
 
     x = face_region[0]
     y = face_region[1]
@@ -266,46 +276,38 @@ def parse_rect(rect):
 
 
 def open_image(path: Path):
-    """Wrapper of PIL.Image.open for JXL and Avif support
-    Opens supported by pillow formats directly.
-    Will try to load image using subprocess (djxl/avifdec)
-    # Will try to load JXL images via jxlpy
-    # (NOTE  jxlpy is ?not? working with latest libjxl as for 05.2022)
-
+    """Kludge to support loading JPEG XL and AVIF images
     Args:
         path (Path): Path of image
 
     Returns:
         Image: PIL Image
     """
-    # try:
-    #     from jxlpy import JXLImagePlugin
-    # except ImportError:
-    #     JXLImagePlugin = None
-
+    suffix = path.suffix.lower()
     try:
-        if path.name.endswith(".jxl"):
-            # if JXLImagePlugin:
-            #     try:
-            #         # ?memory leaks?
-            #         img = Image.open(path)
-            #         img.load()
-            #         return img
-            #     except OSError:
-            #         pass
-            img = open_image_by_cmd(path, "djxl --num_threads=1")
-        elif path.name.endswith(".avif"):
-            img = open_image_by_cmd(path, "avifdec -d 8 --png-compress 0")
-        else:
-            return Image.open(path).convert("RGB")
-        return img
+        if suffix == ".jxl":
+            if JXLImagePlugin:
+                return Image.open(path)
+            else:
+                return open_image_by_cmd(path, ["djxl", "--num_threads=1"])
+
+        if suffix == ".avif":
+            if pillow_avif:
+                return Image.open(path)
+            else:
+                return open_image_by_cmd(
+                    path, ["avifdec", "-d", "8", "--png-compress", "0"]
+                )
+
+        return Image.open(path)
+
     except Exception as e:
         print(path)
         print(e)
         exit()
 
 
-def open_image_by_cmd(path: Path, cmd: str):
+def open_image_by_cmd(path: Path, cmd: list[str]):
     """Load image as BytesIO using shell command
 
     Args:
@@ -316,15 +318,20 @@ def open_image_by_cmd(path: Path, cmd: str):
         Image: PIL Image
     """
     with tempfile.NamedTemporaryFile(prefix="png_", suffix=".png") as tmp:
-        cmd = f'{cmd} "{path.resolve()}" "{tmp.name}"'
-        proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-            # cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr
-        )
-        proc.communicate()
+        cmd.append(str(path.resolve()))
+        cmd.append(tmp.name)
+
+        try:
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            ).check_returncode()
+        except subprocess.CalledProcessError as e:
+            print(f"Subprocess '{e.cmd}' returned non-zero error code: {e.returncode}")
+            print(e.stderr)
+            exit(1)
+
         tmp.seek(0)
         img = BytesIO(tmp.read())
         image = Image.open(img)
