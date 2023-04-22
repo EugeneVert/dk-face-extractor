@@ -289,14 +289,18 @@ def open_image(path: Path):
             if JXLImagePlugin:
                 return Image.open(path)
             else:
-                return open_image_by_cmd(path, ["djxl", "--num_threads=1"])
+                return open_image_by_cmd(
+                    path,
+                    ["djxl", "--num_threads=0", "--color_space=RGB_D65_SRG_Rel_SRG"],
+                )
 
         if suffix == ".avif":
             if pillow_avif:
                 return Image.open(path)
             else:
                 return open_image_by_cmd(
-                    path, ["avifdec", "-d", "8", "--png-compress", "0"]
+                    path,
+                    ["avifdec", "-d", "8", "--png-compress", "0"],
                 )
 
         return Image.open(path)
