@@ -11,6 +11,8 @@ from pathlib import Path
 
 from PIL import Image
 
+import int2base32
+
 try:
     import pillow_avif
 except ImportError:
@@ -20,8 +22,6 @@ try:
     from jxlpy import JXLImagePlugin
 except ImportError:
     JXLImagePlugin = None
-
-BASE32ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
 
 
 def main():
@@ -207,12 +207,9 @@ def save_face(
     tag_folder_path = output_dir / tag_name
     tag_folder_path.mkdir(exist_ok=True)
 
-    region_encode = int("".join(map(str, face_region)))
-    region_encode_base32 = int2base32(region_encode)
+    region_base32 = int2base32.encode_region(face_region)
 
-    output_name = image_path.with_name(
-        f"{image_path.stem}-{region_encode_base32}.png"
-    ).name
+    output_name = image_path.with_name(f"{image_path.stem}-{region_base32}.png").name
     output_path = tag_folder_path / output_name
 
     if (not overwrite) and output_path.exists():
@@ -342,18 +339,6 @@ def open_image_by_cmd(path: Path, cmd: list[str]):
         image.load()
         img.close()
         return image
-
-
-def int2base32(x: int) -> str:
-    res = ""
-    while True:
-        if x < 32:
-            res += BASE32ALPHABET[x]
-            break
-        else:
-            res += BASE32ALPHABET[x % 32]
-            x //= 32
-    return res[::-1]
 
 
 if __name__ == "__main__":
