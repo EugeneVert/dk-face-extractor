@@ -218,35 +218,8 @@ def save_face(
     print(f"Extracting: {image_path}")
     image: Image.Image = open_image(image_path).convert("RGB")
 
-    x = face_region[0]
-    y = face_region[1]
-    width = face_region[2]
-    height = face_region[3]
-
-    square_width = ceil(sqrt(width * height))
-    center = (x + width / 2, y + height / 2)
-    margin = (
-        square_width / 10
-    )  # FaceUtils::faceRectDisplayMargin:utilities/facemanagement/database/faceutils.cpp 438
-
-    x1 = center[0] - square_width / 2 - margin
-    y1 = center[1] - square_width / 2 - margin
-    x2 = center[0] + square_width / 2 + margin
-    y2 = center[1] + square_width / 2 + margin
-
-    box = tuple(
-        map(
-            ceil,
-            (
-                x1 if x1 > 0 else 0,
-                y1 if y1 > 0 else 0,
-                x2 if x2 < image.size[0] else image.size[0],
-                y2 if y2 < image.size[1] else image.size[1],
-            ),
-        )
-    )
-
-    face_crop = image.crop(box)
+    crop_box = get_crop_box(face_region, image.size)
+    face_crop = image.crop(crop_box)
     image.close()
 
     if resize_to != 0:
@@ -257,6 +230,31 @@ def save_face(
     face_crop.close()
 
     return output_path
+
+
+def get_crop_box(
+    face_region: tuple[int, int, int, int], size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """
+    Parse face region in [x, y, width, height] format 
+    to padded region for cropping in [x1, y1, x2, y2] format
+    """
+    x = face_region[0]
+    y = face_region[1]
+    width = face_region[2]
+    height = face_region[3]
+
+    center = (x + width * 0.5, y + height * 0.5)
+    square_width = ceil(sqrt(width * height))
+    # FaceUtils::faceRectDisplayMargin:utilities/facemanagement/database/faceutils.cpp
+    # margin = square_width * 0.1
+    apothem_with_margin = square_width * 0.6
+
+    x1 = ceil(max(center[0] - apothem_with_margin, 0))
+    y1 = ceil(max(center[1] - apothem_with_margin, 0))
+    x2 = ceil(min(center[0] + apothem_with_margin, size[0]))
+    y2 = ceil(min(center[1] + apothem_with_margin, size[1]))
+    return (x1, y1, x2, y2)
 
 
 def parse_rect(rect):
@@ -308,7 +306,7 @@ def open_image(path: Path):
         exit()
 
 
-def open_image_by_cmd(path: Path, cmd: list[str]):
+def open_image_by_cmd(path: Path, cmd: list[str]) -> Image.Image:
     """Load image as BytesIO using shell command
 
     Args:
